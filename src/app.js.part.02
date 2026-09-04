@@ -1,0 +1,63 @@
+    if(family)rows=rows.filter(p=>(p.page_family||'unknown')===family);
+    if(deleted==='yes')rows=rows.filter(p=>p.deleted_live); else if(deleted==='no')rows=rows.filter(p=>!p.deleted_live);
+    if(q)rows=rows.filter(p=>pageMatches(p,q));
+    const sorters={last_desc:p=>p.last_write||'',last_asc:p=>p.last_write||'',revs_desc:p=>p.n_revs||0,name_asc:p=>(p.name||'').toLowerCase(),bytes_desc:p=>p.body_bytes||0};
+    rows=[...rows].sort((a,b)=>{const av=sorters[sort]?.(a)??sorters.last_desc(a),bv=sorters[sort]?.(b)??sorters.last_desc(b); return av<bv?-1:av>bv?1:0});
+    if(['last_desc','revs_desc','bytes_desc'].includes(sort))rows.reverse();
+    return {total:rows.length,offset,limit,rows:rows.slice(offset,offset+limit)};
+  }
+  if(path==='page'){
+    const p=archive.pageById.get(params.id); if(!p)throw new Error('Page not found');
+    return {page:p,revisions:archive.revsByPage.get(p.page_id)||[],events:(archive.eventsByPageKey.get(p.page_key)||[]).map(eventSummary)};
+  }
+  if(path==='revision') return getRevision(params.id);
+  if(path==='diff'){
+    const r=await getRevision(params.id),base=r.diff_base?await getRevision(r.diff_base):null;
+    return {base,revision:r,diff:buildUnifiedDiff(base,r)};
+  }
+  if(path==='events'){
+    const q=String(params.q||'').trim().toLowerCase(),typ=params.type||'',wiki=params.wiki||'',offset=Number(params.offset)||0,limit=Math.max(1,Math.min(500,Number(params.limit)||100));
+    let rows=archive.events;
+    if(typ)rows=rows.filter(e=>e.event_type===typ); if(wiki)rows=rows.filter(e=>e.wiki===wiki); if(q)rows=rows.filter(e=>eventMatches(e,q));
+    rows=[...rows].sort((a,b)=>String(b.time||'').localeCompare(String(a.time||'')));
+    return {total:rows.length,offset,limit,rows:rows.slice(offset,offset+limit).map(eventSummary)};
+  }
+  if(path==='labels'){
+    const q=String(params.q||'').trim().toLowerCase(),wiki=params.wiki||'',human=params.human||'',sort=params.sort||'revs_desc',offset=Number(params.offset)||0,limit=Math.max(1,Math.min(500,Number(params.limit)||100));
+    let rows=archive.labels;
+    if(q)rows=rows.filter(l=>contains(l.label,q)); if(wiki)rows=rows.filter(l=>(l.wikis||[]).includes(wiki)); if(human==='yes')rows=rows.filter(l=>l.is_human_handle); else if(human==='no')rows=rows.filter(l=>!l.is_human_handle);
+    rows=[...rows].sort((a,b)=>{ if(sort==='name_asc')return String(a.label||'').localeCompare(String(b.label||'')); if(sort==='pages_desc')return (b.stored_revision_pages??b.pages?.length??0)-(a.stored_revision_pages??a.pages?.length??0); return (b.stored_revisions||0)-(a.stored_revisions||0); });
+    return {total:rows.length,offset,limit,rows:rows.slice(offset,offset+limit)};
+  }
+  if(path==='label'){
+    const l=archive.labelByName.get(params.name??''); if(!l)throw new Error('Label not found');
+    return {label:l,pages:(l.pages||[]).map(id=>archive.pageById.get(id)).filter(Boolean)};
+  }
+  if(path==='search'){
+    const q=String(params.q||'').trim().toLowerCase(),limit=Math.max(1,Math.min(200,Number(params.limit)||60)),deep=params.deep==='yes';
+    if(q.length<2)return {q,pages:[],labels:[],revisions:[],events:[],deep};
+    const pages=archive.pages.filter(p=>pageMatches(p,q)).slice(0,limit);
+    const labels=archive.labels.filter(l=>contains(l.label,q)).slice(0,limit);
+    const events=[...archive.events].reverse().filter(e=>eventMatches(e,q)).slice(0,limit).map(eventSummary);
+    const revisions=[];
+    if(deep){
+      await loadAllRevisionShards();
+      for(let i=archive.revisions.length-1;i>=0&&revisions.length<limit;i--){
+        const s=archive.revisions[i],r=await getRevision(s.rev_id),body=r.body||'',summary=r.change_summary||'';
+        if(contains(body,q)||contains(summary,q))revisions.push({...s,snippet:makeSnippet(body,q)});
+      }
+      status('Static archive loaded');
+    }
+    return {q,pages,labels,revisions,events,deep};
+  }
+  throw new Error('Unknown archive request');
+}
+
+function setView(view){
+  state.view=view;
+  $$('.nav button').forEach(b=>b.classList.toggle('active', b.dataset.view===view));
+  history.replaceState(null,'',`#${view}`);
+  if(view==='overview') renderOverview();
+  if(view==='pages') renderPages();
+  if(view==='events') renderEvents();
+  if(view==='labels') renderLabels();
