@@ -1,0 +1,88 @@
+name: Deploy Evilwiki Viewer
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+env:
+  SOURCE_BASE: https://collusion.wiki/explorer/download
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Fetch the published Evilwiki export
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source-data
+          for file in pages.jsonl.gz revisions.jsonl.gz events.jsonl.gz labels.jsonl.gz manifest.json.gz; do
+            curl --fail --location --retry 4 --retry-delay 2 \
+              "$SOURCE_BASE/$file" \
+              --output "source-data/$file"
+          done
+
+      - name: Verify the published export
+        shell: bash
+        run: |
+          python - <<'PY'
+          import gzip, hashlib
+          from pathlib import Path
+
+          expected = {
+              "pages.jsonl.gz": "92b296170b496b836cdf5ef783bed9465d2d75db7e1a0becec1c36c8b7c42cfd",
+              "revisions.jsonl.gz": "60df4a515178230aa952d9f64f6215aea4bd95ab2f05e31e484cf9b887e3f793",
+              "events.jsonl.gz": "588584295f1c4a7c3d90b04075ab151504f165ff069534d935cda08853ec28b1",
+              "labels.jsonl.gz": "d94aecd84baecda46344f5b8726a95a9c81e7e41a1c0969fc89a90c8906f0388",
+              "manifest.json.gz": "b6d53e16b5d9a6a0a98d4577238835ee7a574d7d10a8f1312330b4e626c6ba2b",
+          }
+
+          for name, want in expected.items():
+              with gzip.open(Path("source-data") / name, "rb") as f:
+                  got = hashlib.sha256(f.read()).hexdigest()
+              if got != want:
+                  raise SystemExit(f"Checksum mismatch for {name}: {got} != {want}")
+              print(f"verified {name}: {got}")
+          PY
+
+      - name: Build GitHub Pages data bundle
+        run: python tools/build_pages_data.py ../source-data --out ../data --shards 16
+
+      - name: Run archive QA
+        run: python tools/qa_static.py
+
+      - name: Remove build-only source files
+        run: rm -rf source-data
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
