@@ -1,0 +1,59 @@
+  const data=await api('labels',{q:$('#labelQ').value,wiki:$('#labelWiki').value,human:$('#labelHuman').value,sort:$('#labelSort').value,offset:state.labelOffset,limit:state.labelLimit});
+  box.innerHTML=data.rows.length?`<div class="table-wrap"><table><thead><tr><th>Label</th><th>Stored revisions</th><th>Pages</th><th>IPs</th><th>Wikis</th><th>Span</th></tr></thead><tbody>${data.rows.map(labelRow).join('')}</tbody></table></div>${pager('label',data)}`:'<div class="empty">No matching labels.</div>';
+  $$('tbody tr',box).forEach(tr=>tr.onclick=()=>openLabel(tr.dataset.name)); bindPager('label',data,loadLabels);
+}
+function labelRow(l){const name=l.label||'(blank)'; return `<tr data-name="${esc(l.label)}"><td class="name-cell"><strong>${esc(name)}</strong><span>${l.is_human_handle?'human handle':'label'}</span></td><td>${n(l.stored_revisions)}</td><td>${n(l.stored_revision_pages??l.pages?.length)}</td><td>${n(l.stored_revision_ips)}</td><td>${(l.wikis||[]).map(w=>`<span class="tag">${esc(w)}</span>`).join('')}</td><td>${shortDate(l.first_write)} → ${shortDate(l.last_write)}</td></tr>`}
+
+function pager(kind,data){const start=data.total?data.offset+1:0,end=Math.min(data.total,data.offset+data.limit); return `<div class="pager"><span>${n(start)}–${n(end)} of ${n(data.total)}</span><div><button class="btn" data-${kind}-prev ${data.offset<=0?'disabled':''}>← Prev</button> <button class="btn" data-${kind}-next ${end>=data.total?'disabled':''}>Next →</button></div></div>`}
+function bindPager(kind,data,fn){const key=kind+'Offset'; const prev=$(`[data-${kind}-prev]`),next=$(`[data-${kind}-next]`); if(prev)prev.onclick=()=>{state[key]=Math.max(0,data.offset-data.limit);fn()};if(next)next.onclick=()=>{state[key]=data.offset+data.limit;fn()}}
+
+async function openPage(id){
+  try{
+    const data=await api('page',{id}); const p=data.page;
+    drawer.classList.remove('hidden'); drawer.innerHTML=`<div class="drawer-head"><div><h2>${esc(p.name)}</h2><p>${esc(p.page_id)} · ${n(p.n_revs)} revisions · ${n(data.events.length)} related events</p></div><button class="close-btn" id="closeDrawer">×</button></div><div class="drawer-body"><div class="meta-grid">${metaBox('Wiki',p.wiki)}${metaBox('Family',p.page_family||'unknown')}${metaBox('Body bytes',bytes(p.body_bytes))}${metaBox('First write',dt(p.first_write))}${metaBox('Last write',dt(p.last_write))}${metaBox('Live',p.deleted_live?'deleted':'present')}</div><div>${p.labels.map(x=>`<span class="tag">${esc(x||'(blank)')}</span>`).join(' ')}</div><div class="tabs"><button class="active" data-tab="content">Content</button><button data-tab="revisions">Revisions</button><button data-tab="events">Events</button></div><div id="drawerTab"></div></div>`;
+    $('#closeDrawer').onclick=()=>drawer.classList.add('hidden'); $$('.tabs button',drawer).forEach(b=>b.onclick=()=>{ $$('.tabs button',drawer).forEach(x=>x.classList.toggle('active',x===b)); renderPageTab(b.dataset.tab,data)}); renderPageTab('content',data);
+  }catch(e){toast(e.message)}
+}
+function metaBox(k,v){return `<div class="meta-box"><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`}
+async function renderPageTab(tab,data){const box=$('#drawerTab');
+  if(tab==='content'){const r=data.revisions.at(-1); if(!r){box.innerHTML='<div class="empty">No revision body.</div>';return} box.innerHTML='<div class="loading">Loading latest revision…</div>'; const full=await api('revision',{id:r.rev_id}); box.innerHTML=`<div class="actions" style="margin-bottom:10px"><span class="tag">rev ${full.seq}</span><span class="tag">${esc(full.label||'(blank label)')}</span><span class="muted">${dt(full.time)}</span></div><div class="codebox mono">${esc(full.body)}</div>`}
+  if(tab==='revisions'){box.innerHTML=data.revisions.length?`<div class="rev-list">${[...data.revisions].reverse().map(r=>`<div class="rev-item" data-rev="${esc(r.rev_id)}"><div class="rev-seq">#${r.seq}</div><div class="rev-info"><strong>${esc(r.label||'(blank label)')} · ${bytes(r.body_len)}</strong><span>${dt(r.time)} · ${esc(r.ip16||'no IP')}</span></div><button class="btn" data-diff="${esc(r.rev_id)}">Diff</button></div>`).join('')}</div>`:'<div class="empty">No revisions.</div>'; $$('.rev-item',box).forEach(el=>el.onclick=e=>{if(e.target.closest('[data-diff]'))return;showRevision(el.dataset.rev)}); $$('[data-diff]',box).forEach(b=>b.onclick=e=>{e.stopPropagation();showDiff(b.dataset.diff)})}
+  if(tab==='events'){box.innerHTML=data.events.length?`<div class="event-list">${[...data.events].reverse().map(eventRow).join('')}</div>`:'<div class="empty">No related events in this archive.</div>'}
+}
+async function showRevision(id){const r=await api('revision',{id}); $('#drawerTab').innerHTML=`<button class="btn" id="backRevs">← Revision list</button><div style="height:10px"></div><div class="meta-grid">${metaBox('Revision','#'+r.seq)}${metaBox('Actor',r.label||'(blank)')}${metaBox('Time',dt(r.time))}</div><div class="codebox mono">${esc(r.body)}</div>`; $('#backRevs').onclick=()=>$('.tabs [data-tab="revisions"]').click()}
+async function showDiff(id){const d=await api('diff',{id}); $('#drawerTab').innerHTML=`<button class="btn" id="backRevs">← Revision list</button><div style="height:10px"></div><div class="codebox mono">${d.diff.length?d.diff.map(line=>`<span class="diff-line ${line.startsWith('+')&&!line.startsWith('+++')?'add':line.startsWith('-')&&!line.startsWith('---')?'del':line.startsWith('@@')?'hunk':''}">${esc(line)}</span>`).join(''):'No textual changes.'}</div>`; $('#backRevs').onclick=()=>$('.tabs [data-tab="revisions"]').click()}
+
+async function openLabel(name){
+  const data=await api('label',{name}); const l=data.label; drawer.classList.remove('hidden'); drawer.innerHTML=`<div class="drawer-head"><div><h2>${esc(l.label||'(blank label)')}</h2><p>${l.is_human_handle?'Human handle':'Label'} · ${n(l.stored_revisions)} stored revisions</p></div><button class="close-btn" id="closeDrawer">×</button></div><div class="drawer-body"><div class="meta-grid">${metaBox('Stored revisions',n(l.stored_revisions))}${metaBox('Pages',n(l.stored_revision_pages??l.pages?.length))}${metaBox('IPs',n(l.stored_revision_ips))}${metaBox('First write',dt(l.first_write))}${metaBox('Last write',dt(l.last_write))}${metaBox('Save requests',n(l.save_requests||0))}</div><div class="panel"><div class="panel-head"><h3>Pages</h3><span class="muted">${n(data.pages.length)} held pages</span></div><div class="panel-body"><div class="result-list">${data.pages.slice(0,250).map(p=>`<div class="result" data-page="${esc(p.page_id)}"><strong>${esc(p.name)}</strong><p>${esc(p.wiki)} · ${n(p.n_revs)} revisions · ${esc(p.page_family||'unknown')}</p></div>`).join('')}${data.pages.length>250?`<p class="muted">Showing first 250 pages.</p>`:''}</div></div></div></div>`; $('#closeDrawer').onclick=()=>drawer.classList.add('hidden'); $$('[data-page]',drawer).forEach(el=>el.onclick=()=>openPage(el.dataset.page));
+}
+
+async function globalSearch(q,deep=false){
+  q=q.trim(); if(q.length<2){setView(state.view);return}
+  const actions=deep?'':`<button class="btn" id="deepSearchBtn">Search revision bodies</button>`;
+  content.innerHTML=head(`Search: “${q}”`,deep?'Searching page metadata, labels, revision bodies, and event metadata.':'Fast metadata search. Revision bodies are loaded only when you request a deep search.',actions)+'<div class="loading">Searching archive…</div>';
+  try{
+    const d=await api('search',{q,limit:60,deep:deep?'yes':''});
+    const revisionSection=deep?searchSection('Revision text',d.revisions,r=>`<div class="result" data-page="${esc(r.page_id)}"><strong>${esc(r.name)} · rev ${r.seq}</strong><p>${esc(r.snippet)}</p></div>`):`<section class="result-section"><h3>Revision text · on demand</h3><div class="empty">Deep search loads all ${n(state.meta.revision_shards)} compressed body shards once, then searches the full revision text corpus.</div></section>`;
+    content.innerHTML=head(`Search: “${q}”`,`${n(d.pages.length+d.labels.length+d.revisions.length+d.events.length)} result rows shown${deep?' across the full archive':' without revision-body scanning'}.`,deep?'':`<button class="btn" id="deepSearchBtn">Search revision bodies</button>`)+`<div class="search-results">${searchSection('Pages',d.pages,p=>`<div class="result" data-page="${esc(p.page_id)}"><strong>${esc(p.name)}</strong><p>${esc(p.wiki)} · ${n(p.n_revs)} revisions · ${(p.labels||[]).slice(0,3).map(esc).join(', ')}</p></div>`)}${searchSection('Labels',d.labels,l=>`<div class="result" data-label="${esc(l.label)}"><strong>${esc(l.label||'(blank label)')}</strong><p>${n(l.stored_revisions)} revisions · ${n(l.stored_revision_pages??l.pages?.length)} pages</p></div>`)}${revisionSection}${searchSection('Events',d.events,e=>`<div class="result" ${e.page_key?`data-page="${esc(e.page_key.replace('~','/'))}"`:''}><strong>${esc(e.event_type)} · ${esc(e.page||e.param_family||e.event_id)}</strong><p>${dt(e.time)} · ${esc(e.actor_label||e.ip16||e.request_action||'')}</p></div>`)}</div>`;
+    const deepBtn=$('#deepSearchBtn'); if(deepBtn)deepBtn.onclick=()=>globalSearch(q,true);
+    $$('[data-page]',content).forEach(el=>el.onclick=()=>openPage(el.dataset.page)); $$('[data-label]',content).forEach(el=>el.onclick=()=>openLabel(el.dataset.label));
+  }catch(e){status('Search failed','error');content.innerHTML=head(`Search: “${q}”`,'The search could not be completed.')+`<div class="empty">${esc(e.message)}</div>`}
+}
+function searchSection(title,rows,fn){return `<section class="result-section"><h3>${esc(title)} · ${n(rows.length)}</h3>${rows.length?`<div class="result-list">${rows.map(fn).join('')}</div>`:'<div class="empty">No matches.</div>'}</section>`}
+function debounce(fn,ms){let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>fn(...a),ms)}}
+function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),2400)}
+
+async function init(){
+  try{
+    await initArchive();
+    $('#archiveStamp').innerHTML=`Generated ${dt(state.meta.generated_at)}<br>${n(state.meta.counts.pages)} pages · ${n(state.meta.counts.revisions)} revisions`;
+    $$('.nav button').forEach(b=>b.onclick=()=>setView(b.dataset.view)); $('#menuBtn').onclick=()=>$('#sidebar').classList.toggle('open');
+    $('#themeBtn').onclick=()=>{document.documentElement.classList.toggle('dark');localStorage.setItem('evilwiki-theme',document.documentElement.classList.contains('dark')?'dark':'light')};
+    if(localStorage.getItem('evilwiki-theme')==='dark')document.documentElement.classList.add('dark');
+    document.addEventListener('keydown',e=>{if(e.key==='/'&&!['INPUT','TEXTAREA'].includes(document.activeElement.tagName)){e.preventDefault();$('#globalSearch').focus()}if(e.key==='Escape'){drawer.classList.add('hidden');$('#sidebar').classList.remove('open')}});
+    $('#globalSearch').addEventListener('keydown',e=>{if(e.key==='Enter')globalSearch(e.target.value,true)});
+    $('#globalSearch').addEventListener('input',debounce(e=>{if(e.target.value.trim().length>=3)globalSearch(e.target.value,false)},500));
+    const requested=location.hash.slice(1); setView(['overview','pages','events','labels'].includes(requested)?requested:'overview');
+  }catch(e){content.innerHTML=`<div class="empty"><strong>Couldn’t load the archive.</strong><br>${esc(e.message)}</div>`;status('Load failed','error')}
+}
+init();
