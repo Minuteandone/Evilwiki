@@ -16,7 +16,7 @@ The viewer includes:
 
 ## GitHub Pages deployment
 
-The repository intentionally keeps the multi-megabyte archive out of Git history. On every Pages deployment, `.github/workflows/pages.yml` downloads the five machine-readable files from the public Collusion.wiki export, verifies the published SHA-256 checksums, rebuilds the static viewer data into 16 revision shards, runs integrity QA, and then publishes the resulting site.
+The repository intentionally keeps the multi-megabyte archive out of Git history. On every Pages deployment, `.github/workflows/pages.yml` assembles the browser assets, downloads the five machine-readable files from the public Collusion.wiki export, verifies the published SHA-256 checksums, rebuilds the static viewer data into 16 revision shards, runs integrity QA, and then publishes the resulting site.
 
 Source export:
 
@@ -41,6 +41,8 @@ If GitHub Pages has not yet been enabled for the repository, open **Settings →
 Download the five source files above into `source-data/`, then run:
 
 ```bash
+cat src/app.js.part.* > app.js
+cat src/styles.css.part.* > styles.css
 python3 tools/build_pages_data.py ../source-data --out ../data --shards 16
 python3 tools/qa_static.py
 python3 -m http.server 8000
