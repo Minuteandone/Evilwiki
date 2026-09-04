@@ -1,0 +1,63 @@
+  $('#sidebar').classList.remove('open');
+}
+function head(title, sub, actions=''){ return `<div class="page-head"><div class="page-title"><h1>${esc(title)}</h1><p>${sub}</p></div><div class="actions">${actions}</div></div>`; }
+
+async function renderOverview(){
+  const m=state.meta;
+  content.innerHTML = head('Archive overview', `A compact view of the held Evilwiki corpus generated ${dt(m.generated_at)}.`) + `
+    <div class="stats-grid">
+      ${stat('Pages',n(m.counts.pages),'distinct wiki/page pairs')}
+      ${stat('Revisions',n(m.counts.revisions),bytes(m.body_bytes)+' of revision bodies')}
+      ${stat('Labels',n(m.counts.labels),n(m.human_handles.length)+' marked human handles')}
+      ${stat('Events',n(m.counts.events),'save/delete/revert/probe rows')}
+    </div>
+    <div class="grid-2">
+      <div class="panel"><div class="panel-head"><h2>Wiki footprint</h2><span class="muted">pages / revisions</span></div><div class="panel-body">${wikiBars(m.wikis)}</div></div>
+      <div class="panel"><div class="panel-head"><h2>Event mix</h2><span class="muted">physical rows</span></div><div class="panel-body"><div class="legend-grid">${Object.entries(m.event_types).map(([k,v])=>`<div class="legend-item"><span class="tag ${k}">${esc(k)}</span><strong>${n(v)}</strong><span>${((v/m.counts.events)*100).toFixed(1)}% of rows</span></div>`).join('')}</div></div></div>
+      <div class="panel"><div class="panel-head"><h2>Most common page families</h2><span class="muted">top 10</span></div><div class="panel-body">${familyBars(m.page_families.slice(0,10))}</div></div>
+      <div class="panel"><div class="panel-head"><h2>Archive notes</h2><span class="muted">static build</span></div><div class="panel-body"><div class="fact-list">${facts(m)}</div></div></div>
+    </div>`;
+}
+function stat(label,value,sub){return `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value">${value}</div><div class="stat-sub">${sub}</div></div>`}
+function wikiBars(rows){const max=Math.max(...rows.map(x=>x.pages)); return rows.map(x=>`<div class="bar-row"><strong>${esc(x.wiki)}</strong><div class="bar-track"><div class="bar-fill" style="width:${clampPct(x.pages,max)}%"></div></div><div class="bar-count">${n(x.pages)} / ${n(x.revisions)}</div></div>`).join('')}
+function familyBars(rows){const max=Math.max(...rows.map(x=>x[1])); return rows.map(([k,v])=>`<div class="bar-row"><span title="${esc(k)}">${esc(k.length>14?k.slice(0,13)+'…':k)}</span><div class="bar-track"><div class="bar-fill" style="width:${clampPct(v,max)}%"></div></div><div class="bar-count">${n(v)}</div></div>`).join('')}
+function facts(m){
+  const f=m.facts||{}; const picks=['held_revisions','held_pages','dse_held_revisions'];
+  let out=`<div class="fact"><b>GitHub Pages build</b><p>This version is entirely static. Page browsing uses compact indexes; full revision bodies are split into ${n(m.revision_shards)} lazy-loaded shards.</p></div>`;
+  out+=picks.filter(k=>f[k]).map(k=>`<div class="fact"><b>${esc(k.replaceAll('_',' '))}: ${n(f[k].value)}</b><p>${esc(f[k].definition||'')}</p></div>`).join('');
+  out += `<div class="fact"><b>Published write-date cut</b><p>${esc(m.cut?.field)} ${esc(m.cut?.operator)} ${esc(m.cut?.value)}. Revision time range in this bundle: ${dt(m.date_range.first)} → ${dt(m.date_range.last)}.</p></div>`;
+  return out;
+}
+
+async function renderPages(){
+  content.innerHTML = head('Pages','Browse every held page, then open one to inspect its revision history and related events.') + filtersPages() + '<div class="loading">Loading pages…</div>';
+  bindPageFilters(); await loadPages();
+}
+function filtersPages(){const w=state.meta.wikis.map(x=>`<option>${esc(x.wiki)}</option>`).join(''); const fam=state.meta.page_families.map(x=>`<option value="${esc(x[0])}">${esc(x[0])}</option>`).join(''); return `<div class="filters"><input id="pageQ" placeholder="Filter page name, label, family…"><select id="pageWiki"><option value="">All wikis</option>${w}</select><select id="pageFamily"><option value="">All families</option>${fam}</select><select id="pageDeleted"><option value="">Any live state</option><option value="yes">Deleted live</option><option value="no">Not deleted live</option></select><select id="pageSort"><option value="last_desc">Newest activity</option><option value="revs_desc">Most revisions</option><option value="bytes_desc">Largest bodies</option><option value="name_asc">Name A–Z</option></select></div><div id="pageResults"></div>`}
+function bindPageFilters(){['pageQ','pageWiki','pageFamily','pageDeleted','pageSort'].forEach(id=>$('#'+id).addEventListener(id==='pageQ'?'input':'change', debounce(()=>{state.pageOffset=0;loadPages()},220)))}
+async function loadPages(){
+  const box=$('#pageResults'); box.innerHTML='<div class="loading">Loading…</div>';
+  const data=await api('pages',{q:$('#pageQ').value,wiki:$('#pageWiki').value,family:$('#pageFamily').value,deleted:$('#pageDeleted').value,sort:$('#pageSort').value,offset:state.pageOffset,limit:state.pageLimit});
+  box.innerHTML = data.rows.length ? `<div class="table-wrap"><table><thead><tr><th>Page</th><th>Wiki</th><th>Family</th><th>Revisions</th><th>Labels</th><th>Last write</th><th>Live</th></tr></thead><tbody>${data.rows.map(pageRow).join('')}</tbody></table></div>${pager('page',data)}` : '<div class="empty">No matching pages.</div>';
+  $$('tbody tr',box).forEach(tr=>tr.onclick=()=>openPage(tr.dataset.id)); bindPager('page',data,loadPages);
+}
+function pageRow(p){return `<tr data-id="${esc(p.page_id)}"><td class="name-cell"><strong>${esc(p.name)}</strong><span>${bytes(p.body_bytes)} · ${n(p.n_ips)} IPs</span></td><td>${esc(p.wiki)}</td><td><span class="tag">${esc(p.page_family||'unknown')}</span></td><td>${n(p.n_revs)}</td><td>${p.labels.slice(0,3).map(x=>`<span class="tag">${esc(x||'(blank)')}</span>`).join('')}${p.n_labels>3?` <span class="muted">+${p.n_labels-3}</span>`:''}</td><td>${shortDate(p.last_write)}</td><td>${p.deleted_live?'<span class="tag delete">deleted</span>':'<span class="tag save">present</span>'}</td></tr>`}
+
+async function renderEvents(){
+  content.innerHTML = head('Event timeline','Inspect save, delete, revert, and probe rows in reverse chronological order.') + `<div class="filters"><input id="eventQ" placeholder="Search page, actor, IP, action…"><select id="eventType"><option value="">All event types</option>${Object.keys(state.meta.event_types).map(x=>`<option>${x}</option>`).join('')}</select><select id="eventWiki"><option value="">All wikis</option>${state.meta.wikis.map(x=>`<option>${x.wiki}</option>`).join('')}</select></div><div id="eventResults"></div>`;
+  ['eventQ','eventType','eventWiki'].forEach(id=>$('#'+id).addEventListener(id==='eventQ'?'input':'change',debounce(()=>{state.eventOffset=0;loadEvents()},220))); await loadEvents();
+}
+async function loadEvents(){
+  const box=$('#eventResults'); box.innerHTML='<div class="loading">Loading…</div>';
+  const data=await api('events',{q:$('#eventQ').value,type:$('#eventType').value,wiki:$('#eventWiki').value,offset:state.eventOffset,limit:state.eventLimit});
+  box.innerHTML = data.rows.length ? `<div class="event-list">${data.rows.map(eventRow).join('')}</div>${pager('event',data)}`:'<div class="empty">No matching events.</div>';
+  $$('.event-row[data-page]',box).forEach(el=>el.onclick=()=>{if(el.dataset.page)openPage(el.dataset.page)}); bindPager('event',data,loadEvents);
+}
+function eventRow(e){const pid=e.page_key?e.page_key.replace('~','/'):''; return `<div class="event-row" data-page="${esc(pid)}"><div class="event-time">${dt(e.time)}</div><div class="event-type"><span class="tag ${esc(e.event_type)}">${esc(e.event_type)}</span>${e.wiki?` <span class="tag">${esc(e.wiki)}</span>`:''}</div><div class="event-main"><strong>${esc(e.page||e.param_family||e.event_id)}</strong><small>${esc(e.change_summary||e.request_action||e.relation_type||'')}</small></div><div class="event-actor">${esc(e.actor_label||e.ip16||'—')}</div></div>`}
+
+async function renderLabels(){
+  content.innerHTML = head('Labels','Browse actor labels attached to revisions and save requests.') + `<div class="filters"><input id="labelQ" placeholder="Filter labels…"><select id="labelWiki"><option value="">All wikis</option>${state.meta.wikis.map(x=>`<option>${x.wiki}</option>`).join('')}</select><select id="labelHuman"><option value="">Any type</option><option value="yes">Human handles</option><option value="no">Other labels</option></select><select id="labelSort"><option value="revs_desc">Most revisions</option><option value="pages_desc">Most pages</option><option value="name_asc">Name A–Z</option></select></div><div id="labelResults"></div>`;
+  ['labelQ','labelWiki','labelHuman','labelSort'].forEach(id=>$('#'+id).addEventListener(id==='labelQ'?'input':'change',debounce(()=>{state.labelOffset=0;loadLabels()},220))); await loadLabels();
+}
+async function loadLabels(){
+  const box=$('#labelResults'); box.innerHTML='<div class="loading">Loading…</div>';
