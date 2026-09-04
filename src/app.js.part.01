@@ -1,0 +1,63 @@
+    const post=Math.min(3,before.length-a1,after.length-b1),aEnd=a1+post,bEnd=b1+post;
+    out.push(`@@ -${rangeText(aStart,aEnd-aStart)} +${rangeText(bStart,bEnd-bStart)} @@`);
+    for(let i=0;i<pre;i++) out.push(' '+(before[aStart+i]??''));
+    for(let i=a0;i<a1;i++) out.push('-'+(before[i]??''));
+    for(let i=b0;i<b1;i++) out.push('+'+(after[i]??''));
+    for(let i=0;i<post;i++) out.push(' '+(after[b1+i]??''));
+  }
+  return out;
+}
+
+async function loadRevisionShard(id){
+  if(archive.shardCache.has(id)) return archive.shardCache.get(id);
+  const key=String(id).padStart(2,'0');
+  const promise=loadJsonlGz(`${DATA_ROOT}revisions/${key}.jsonl.gz`).then(rows=>new Map(rows.map(r=>[r.rev_id,r])));
+  archive.shardCache.set(id,promise);
+  return promise;
+}
+async function getRevision(id){
+  const s=archive.revSummaryById.get(id);
+  if(!s)throw new Error('Revision not found');
+  const shard=await loadRevisionShard(s.shard);
+  const r=shard.get(id);
+  if(!r)throw new Error('Revision body not found');
+  return r;
+}
+async function loadAllRevisionShards(){
+  const count=state.meta.revision_shards||16;
+  const ids=[...Array(count).keys()];
+  let done=0;
+  for(let i=0;i<ids.length;i+=4){
+    const batch=ids.slice(i,i+4);
+    await Promise.all(batch.map(loadRevisionShard));
+    done+=batch.length;
+    status(`Deep search: loaded ${done}/${count} revision shards…`,'busy');
+  }
+}
+
+async function initArchive(){
+  status('Loading archive indexes…','busy');
+  const [meta,pages,labels,events,revisions]=await Promise.all([
+    fetch(`${DATA_ROOT}meta.json`).then(r=>{if(!r.ok)throw new Error('Couldn’t load archive metadata');return r.json()}),
+    loadJsonlGz(`${DATA_ROOT}pages.jsonl.gz`),
+    loadJsonlGz(`${DATA_ROOT}labels.jsonl.gz`),
+    loadJsonlGz(`${DATA_ROOT}events.jsonl.gz`),
+    loadJsonlGz(`${DATA_ROOT}revision-summaries.jsonl.gz`),
+  ]);
+  state.meta=meta; archive.pages=pages; archive.labels=labels; archive.events=events; archive.revisions=revisions;
+  for(const p of pages) archive.pageById.set(p.page_id,p);
+  for(const l of labels) archive.labelByName.set(l.label||'',l);
+  for(const r of revisions){ archive.revSummaryById.set(r.rev_id,r); addMapList(archive.revsByPage,r.page_id,r); }
+  for(const rows of archive.revsByPage.values()) rows.sort((a,b)=>(a.seq||0)-(b.seq||0)||String(a.time||'').localeCompare(String(b.time||'')));
+  for(const e of events) if(e.page_key)addMapList(archive.eventsByPageKey,e.page_key,e);
+  for(const rows of archive.eventsByPageKey.values()) rows.sort((a,b)=>String(a.time||'').localeCompare(String(b.time||'')));
+  status('Static archive loaded');
+}
+
+async function api(path,params={}){
+  if(path==='meta')return state.meta;
+  if(path==='pages'){
+    const q=String(params.q||'').trim().toLowerCase(),wiki=params.wiki||'',family=params.family||'',deleted=params.deleted||'',sort=params.sort||'last_desc';
+    const offset=Number(params.offset)||0,limit=Math.max(1,Math.min(500,Number(params.limit)||100));
+    let rows=archive.pages;
+    if(wiki)rows=rows.filter(p=>p.wiki===wiki);
