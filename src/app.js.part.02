@@ -1,63 +1,54 @@
-    if(family)rows=rows.filter(p=>(p.page_family||'unknown')===family);
-    if(deleted==='yes')rows=rows.filter(p=>p.deleted_live); else if(deleted==='no')rows=rows.filter(p=>!p.deleted_live);
-    if(q)rows=rows.filter(p=>pageMatches(p,q));
-    const sorters={last_desc:p=>p.last_write||'',last_asc:p=>p.last_write||'',revs_desc:p=>p.n_revs||0,name_asc:p=>(p.name||'').toLowerCase(),bytes_desc:p=>p.body_bytes||0};
-    rows=[...rows].sort((a,b)=>{const av=sorters[sort]?.(a)??sorters.last_desc(a),bv=sorters[sort]?.(b)??sorters.last_desc(b); return av<bv?-1:av>bv?1:0});
-    if(['last_desc','revs_desc','bytes_desc'].includes(sort))rows.reverse();
-    return {total:rows.length,offset,limit,rows:rows.slice(offset,offset+limit)};
-  }
-  if(path==='page'){
-    const p=archive.pageById.get(params.id); if(!p)throw new Error('Page not found');
-    return {page:p,revisions:archive.revsByPage.get(p.page_id)||[],events:(archive.eventsByPageKey.get(p.page_key)||[]).map(eventSummary)};
-  }
-  if(path==='revision') return getRevision(params.id);
-  if(path==='diff'){
-    const r=await getRevision(params.id),base=r.diff_base?await getRevision(r.diff_base):null;
-    return {base,revision:r,diff:buildUnifiedDiff(base,r)};
-  }
-  if(path==='events'){
-    const q=String(params.q||'').trim().toLowerCase(),typ=params.type||'',wiki=params.wiki||'',offset=Number(params.offset)||0,limit=Math.max(1,Math.min(500,Number(params.limit)||100));
-    let rows=archive.events;
-    if(typ)rows=rows.filter(e=>e.event_type===typ); if(wiki)rows=rows.filter(e=>e.wiki===wiki); if(q)rows=rows.filter(e=>eventMatches(e,q));
-    rows=[...rows].sort((a,b)=>String(b.time||'').localeCompare(String(a.time||'')));
-    return {total:rows.length,offset,limit,rows:rows.slice(offset,offset+limit).map(eventSummary)};
-  }
-  if(path==='labels'){
-    const q=String(params.q||'').trim().toLowerCase(),wiki=params.wiki||'',human=params.human||'',sort=params.sort||'revs_desc',offset=Number(params.offset)||0,limit=Math.max(1,Math.min(500,Number(params.limit)||100));
-    let rows=archive.labels;
-    if(q)rows=rows.filter(l=>contains(l.label,q)); if(wiki)rows=rows.filter(l=>(l.wikis||[]).includes(wiki)); if(human==='yes')rows=rows.filter(l=>l.is_human_handle); else if(human==='no')rows=rows.filter(l=>!l.is_human_handle);
-    rows=[...rows].sort((a,b)=>{ if(sort==='name_asc')return String(a.label||'').localeCompare(String(b.label||'')); if(sort==='pages_desc')return (b.stored_revision_pages??b.pages?.length??0)-(a.stored_revision_pages??a.pages?.length??0); return (b.stored_revisions||0)-(a.stored_revisions||0); });
-    return {total:rows.length,offset,limit,rows:rows.slice(offset,offset+limit)};
-  }
-  if(path==='label'){
-    const l=archive.labelByName.get(params.name??''); if(!l)throw new Error('Label not found');
-    return {label:l,pages:(l.pages||[]).map(id=>archive.pageById.get(id)).filter(Boolean)};
-  }
-  if(path==='search'){
-    const q=String(params.q||'').trim().toLowerCase(),limit=Math.max(1,Math.min(200,Number(params.limit)||60)),deep=params.deep==='yes';
-    if(q.length<2)return {q,pages:[],labels:[],revisions:[],events:[],deep};
-    const pages=archive.pages.filter(p=>pageMatches(p,q)).slice(0,limit);
-    const labels=archive.labels.filter(l=>contains(l.label,q)).slice(0,limit);
-    const events=[...archive.events].reverse().filter(e=>eventMatches(e,q)).slice(0,limit).map(eventSummary);
-    const revisions=[];
-    if(deep){
-      await loadAllRevisionShards();
-      for(let i=archive.revisions.length-1;i>=0&&revisions.length<limit;i--){
-        const s=archive.revisions[i],r=await getRevision(s.rev_id),body=r.body||'',summary=r.change_summary||'';
-        if(contains(body,q)||contains(summary,q))revisions.push({...s,snippet:makeSnippet(body,q)});
-      }
-      status('Static archive loaded');
-    }
-    return {q,pages,labels,revisions,events,deep};
-  }
-  throw new Error('Unknown archive request');
+function stat(label,value,sub){return `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value">${value}</div><div class="stat-sub">${sub}</div></div>`}
+function wikiBars(rows){const max=Math.max(...rows.map(x=>x.pages)); return rows.map(x=>`<div class="bar-row"><strong>${esc(x.wiki)}</strong><div class="bar-track"><div class="bar-fill" style="width:${clampPct(x.pages,max)}%"></div></div><div class="bar-count">${n(x.pages)} / ${n(x.revisions)}</div></div>`).join('')}
+function familyBars(rows){const max=Math.max(...rows.map(x=>x[1])); return rows.map(([k,v])=>`<div class="bar-row"><span title="${esc(k)}">${esc(k.length>14?k.slice(0,13)+'…':k)}</span><div class="bar-track"><div class="bar-fill" style="width:${clampPct(v,max)}%"></div></div><div class="bar-count">${n(v)}</div></div>`).join('')}
+function facts(m){
+  const f=m.facts||{}; const picks=['held_revisions','held_pages','dse_held_revisions'];
+  let out=`<div class="fact"><b>GitHub Pages build</b><p>This version is entirely static. Page browsing uses compact indexes; full revision bodies are split into ${n(m.revision_shards)} lazy-loaded shards.</p></div>`;
+  out+=picks.filter(k=>f[k]).map(k=>`<div class="fact"><b>${esc(k.replaceAll('_',' '))}: ${n(f[k].value)}</b><p>${esc(f[k].definition||'')}</p></div>`).join('');
+  out += `<div class="fact"><b>Published write-date cut</b><p>${esc(m.cut?.field)} ${esc(m.cut?.operator)} ${esc(m.cut?.value)}. Revision time range in this bundle: ${dt(m.date_range.first)} → ${dt(m.date_range.last)}.</p></div>`;
+  return out;
 }
 
-function setView(view){
-  state.view=view;
-  $$('.nav button').forEach(b=>b.classList.toggle('active', b.dataset.view===view));
-  history.replaceState(null,'',`#${view}`);
-  if(view==='overview') renderOverview();
-  if(view==='pages') renderPages();
-  if(view==='events') renderEvents();
-  if(view==='labels') renderLabels();
+async function renderPages(){
+  content.innerHTML = head('Pages','Browse every held page, then open one to inspect its revision history and related events.') + filtersPages() + '<div class="loading">Loading pages…</div>';
+  bindPageFilters(); await loadPages();
+}
+function filtersPages(){const w=state.meta.wikis.map(x=>`<option>${esc(x.wiki)}</option>`).join(''); const fam=state.meta.page_families.map(x=>`<option value="${esc(x[0])}">${esc(x[0])}</option>`).join(''); return `<div class="filters"><input id="pageQ" placeholder="Filter page name, label, family…"><select id="pageWiki"><option value="">All wikis</option>${w}</select><select id="pageFamily"><option value="">All families</option>${fam}</select><select id="pageDeleted"><option value="">Any live state</option><option value="yes">Deleted live</option><option value="no">Not deleted live</option></select><select id="pageSort"><option value="last_desc">Newest activity</option><option value="revs_desc">Most revisions</option><option value="bytes_desc">Largest bodies</option><option value="name_asc">Name A–Z</option></select></div><div id="pageResults"></div>`}
+function bindPageFilters(){['pageQ','pageWiki','pageFamily','pageDeleted','pageSort'].forEach(id=>$('#'+id).addEventListener(id==='pageQ'?'input':'change', debounce(()=>{state.pageOffset=0;loadPages()},220)))}
+async function loadPages(){
+  const box=$('#pageResults'); box.innerHTML='<div class="loading">Loading…</div>';
+  const data=await api('pages',{q:$('#pageQ').value,wiki:$('#pageWiki').value,family:$('#pageFamily').value,deleted:$('#pageDeleted').value,sort:$('#pageSort').value,offset:state.pageOffset,limit:state.pageLimit});
+  box.innerHTML = data.rows.length ? `<div class="table-wrap"><table><thead><tr><th>Page</th><th>Wiki</th><th>Family</th><th>Revisions</th><th>Labels</th><th>Last write</th><th>Live</th></tr></thead><tbody>${data.rows.map(pageRow).join('')}</tbody></table></div>${pager('page',data)}` : '<div class="empty">No matching pages.</div>';
+  $$('tbody tr',box).forEach(tr=>tr.onclick=()=>openPage(tr.dataset.id)); bindPager('page',data,loadPages);
+}
+function pageRow(p){return `<tr data-id="${esc(p.page_id)}"><td class="name-cell"><strong>${esc(p.name)}</strong><span>${bytes(p.body_bytes)} · ${n(p.n_ips)} IPs</span>${p.description?`<span class="desc-mini">${esc(p.description)}</span>`:''}</td><td>${esc(p.wiki)}</td><td><span class="tag">${esc(p.page_family||'unknown')}</span></td><td>${n(p.n_revs)}</td><td>${p.labels.slice(0,3).map(x=>`<span class="tag">${esc(x||'(blank)')}</span>`).join('')}${p.n_labels>3?` <span class="muted">+${p.n_labels-3}</span>`:''}</td><td>${shortDate(p.last_write)}</td><td>${p.deleted_live?'<span class="tag delete">deleted</span>':'<span class="tag save">present</span>'}</td></tr>`}
+
+
+async function renderDescriptions(){
+  state.descLetter='';
+  content.innerHTML = head('Page descriptions', `All ${n(state.meta.counts.pages)} held pages, described and sorted alphabetically. Descriptions are derived from the latest stored revision plus the archive's page-family classification.`, `<a class="btn" href="./data/page-descriptions.csv" download>Download CSV</a>`) + descriptionsFilters() + '<div id="descriptionResults"><div class="loading">Loading descriptions…</div></div>';
+  bindDescriptionFilters(); await loadDescriptions();
+}
+function descriptionsFilters(){
+  const w=state.meta.wikis.map(x=>`<option>${esc(x.wiki)}</option>`).join('');
+  const fam=state.meta.page_families.map(x=>`<option value="${esc(x[0])}">${esc(x[0])}</option>`).join('');
+  const letters=(state.meta.description_prefixes||[]).map(([k,v])=>`<button class="prefix-btn" data-desc-letter="${esc(k)}">${esc(k)}<span>${n(v)}</span></button>`).join('');
+  return `<div class="filters desc-filters"><input id="descQ" placeholder="Search descriptions or page names…"><input id="descPrefix" placeholder="Prefix, e.g. AgentDataUSA"><select id="descWiki"><option value="">All wikis</option>${w}</select><select id="descFamily"><option value="">All families</option>${fam}</select></div><div class="prefix-bar"><button class="prefix-btn active" data-desc-letter="">All<span>${n(state.meta.counts.pages)}</span></button>${letters}</div>`;
+}
+function bindDescriptionFilters(){
+  ['descQ','descPrefix','descWiki','descFamily'].forEach(id=>$('#'+id).addEventListener(id==='descQ'||id==='descPrefix'?'input':'change',debounce(()=>{state.descOffset=0;state.descLetter='';$$('[data-desc-letter]').forEach(b=>b.classList.toggle('active',b.dataset.descLetter===''));loadDescriptions()},220)));
+  $$('[data-desc-letter]').forEach(b=>b.onclick=()=>{state.descLetter=b.dataset.descLetter;state.descOffset=0;$('#descPrefix').value='';$$('[data-desc-letter]').forEach(x=>x.classList.toggle('active',x===b));loadDescriptions()});
+}
+async function loadDescriptions(){
+  const box=$('#descriptionResults'); if(!box)return; box.innerHTML='<div class="loading">Loading…</div>';
+  const data=await api('descriptions',{q:$('#descQ').value,prefix:$('#descPrefix').value,wiki:$('#descWiki').value,family:$('#descFamily').value,letter:state.descLetter,offset:state.descOffset,limit:state.descLimit});
+  if(!data.rows.length){box.innerHTML='<div class="empty">No matching page descriptions.</div>';return}
+  let lastGroup=null,html='<div class="description-index">';
+  for(const d of data.rows){
+    const group=d.prefix||'#';
+    if(group!==lastGroup){html+=`<div class="description-group" id="prefix-${encodeURIComponent(group)}">${esc(group)}</div>`;lastGroup=group}
+    html+=descriptionRow(d);
+  }
+  html+='</div>'+pager('desc',data); box.innerHTML=html;
+  $$('[data-page]',box).forEach(el=>el.onclick=()=>openPage(el.dataset.page)); bindPager('desc',data,loadDescriptions);
+}

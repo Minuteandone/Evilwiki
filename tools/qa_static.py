@@ -20,13 +20,27 @@ pages = list(jsonl(DATA / 'pages.jsonl.gz'))
 labels = list(jsonl(DATA / 'labels.jsonl.gz'))
 events = list(jsonl(DATA / 'events.jsonl.gz'))
 summaries = list(jsonl(DATA / 'revision-summaries.jsonl.gz'))
+descriptions = list(jsonl(DATA / 'page-descriptions.jsonl.gz'))
 
 assert len(pages) == meta['counts']['pages']
 assert len(labels) == meta['counts']['labels']
 assert len(events) == meta['counts']['events']
 assert len(summaries) == meta['counts']['revisions']
+assert len(descriptions) == meta['counts']['pages']
 
 page_ids = {p['page_id'] for p in pages}
+
+# Every page has exactly one non-empty description, sorted alphabetically by title.
+desc_ids = [d['page_id'] for d in descriptions]
+assert len(desc_ids) == len(set(desc_ids)) == len(page_ids)
+assert set(desc_ids) == page_ids
+assert all((d.get('description') or '').strip() for d in descriptions)
+assert all(
+    ((descriptions[i].get('name') or '').casefold(), descriptions[i].get('wiki') or '')
+    <= ((descriptions[i+1].get('name') or '').casefold(), descriptions[i+1].get('wiki') or '')
+    for i in range(len(descriptions)-1)
+), 'Page descriptions are not alphabetically sorted'
+
 seen_revs = set()
 by_page = defaultdict(list)
 shard_counts = Counter()
@@ -53,5 +67,5 @@ for p in pages:
     assert len(by_page[p['page_id']]) == p['n_revs'], (p['page_id'], len(by_page[p['page_id']]), p['n_revs'])
 
 print('QA PASS')
-print(f"pages={len(pages):,} labels={len(labels):,} events={len(events):,} revisions={len(summaries):,}")
+print(f"pages={len(pages):,} labels={len(labels):,} events={len(events):,} revisions={len(summaries):,} descriptions={len(descriptions):,}")
 print(f"shards={meta['revision_shards']} min_revisions_per_shard={min(shard_counts.values())} max={max(shard_counts.values())}")

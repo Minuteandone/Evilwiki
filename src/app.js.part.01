@@ -1,63 +1,99 @@
-    const post=Math.min(3,before.length-a1,after.length-b1),aEnd=a1+post,bEnd=b1+post;
-    out.push(`@@ -${rangeText(aStart,aEnd-aStart)} +${rangeText(bStart,bEnd-bStart)} @@`);
-    for(let i=0;i<pre;i++) out.push(' '+(before[aStart+i]??''));
-    for(let i=a0;i<a1;i++) out.push('-'+(before[i]??''));
-    for(let i=b0;i<b1;i++) out.push('+'+(after[i]??''));
-    for(let i=0;i<post;i++) out.push(' '+(after[b1+i]??''));
-  }
-  return out;
-}
-
-async function loadRevisionShard(id){
-  if(archive.shardCache.has(id)) return archive.shardCache.get(id);
-  const key=String(id).padStart(2,'0');
-  const promise=loadJsonlGz(`${DATA_ROOT}revisions/${key}.jsonl.gz`).then(rows=>new Map(rows.map(r=>[r.rev_id,r])));
-  archive.shardCache.set(id,promise);
-  return promise;
-}
-async function getRevision(id){
-  const s=archive.revSummaryById.get(id);
-  if(!s)throw new Error('Revision not found');
-  const shard=await loadRevisionShard(s.shard);
-  const r=shard.get(id);
-  if(!r)throw new Error('Revision body not found');
-  return r;
-}
-async function loadAllRevisionShards(){
-  const count=state.meta.revision_shards||16;
-  const ids=[...Array(count).keys()];
-  let done=0;
-  for(let i=0;i<ids.length;i+=4){
-    const batch=ids.slice(i,i+4);
-    await Promise.all(batch.map(loadRevisionShard));
-    done+=batch.length;
-    status(`Deep search: loaded ${done}/${count} revision shards…`,'busy');
-  }
-}
-
-async function initArchive(){
-  status('Loading archive indexes…','busy');
-  const [meta,pages,labels,events,revisions]=await Promise.all([
-    fetch(`${DATA_ROOT}meta.json`).then(r=>{if(!r.ok)throw new Error('Couldn’t load archive metadata');return r.json()}),
-    loadJsonlGz(`${DATA_ROOT}pages.jsonl.gz`),
-    loadJsonlGz(`${DATA_ROOT}labels.jsonl.gz`),
-    loadJsonlGz(`${DATA_ROOT}events.jsonl.gz`),
-    loadJsonlGz(`${DATA_ROOT}revision-summaries.jsonl.gz`),
-  ]);
-  state.meta=meta; archive.pages=pages; archive.labels=labels; archive.events=events; archive.revisions=revisions;
-  for(const p of pages) archive.pageById.set(p.page_id,p);
-  for(const l of labels) archive.labelByName.set(l.label||'',l);
-  for(const r of revisions){ archive.revSummaryById.set(r.rev_id,r); addMapList(archive.revsByPage,r.page_id,r); }
-  for(const rows of archive.revsByPage.values()) rows.sort((a,b)=>(a.seq||0)-(b.seq||0)||String(a.time||'').localeCompare(String(b.time||'')));
-  for(const e of events) if(e.page_key)addMapList(archive.eventsByPageKey,e.page_key,e);
-  for(const rows of archive.eventsByPageKey.values()) rows.sort((a,b)=>String(a.time||'').localeCompare(String(b.time||'')));
-  status('Static archive loaded');
-}
-
-async function api(path,params={}){
-  if(path==='meta')return state.meta;
-  if(path==='pages'){
     const q=String(params.q||'').trim().toLowerCase(),wiki=params.wiki||'',family=params.family||'',deleted=params.deleted||'',sort=params.sort||'last_desc';
     const offset=Number(params.offset)||0,limit=Math.max(1,Math.min(500,Number(params.limit)||100));
     let rows=archive.pages;
     if(wiki)rows=rows.filter(p=>p.wiki===wiki);
+    if(family)rows=rows.filter(p=>(p.page_family||'unknown')===family);
+    if(deleted==='yes')rows=rows.filter(p=>p.deleted_live); else if(deleted==='no')rows=rows.filter(p=>!p.deleted_live);
+    if(q)rows=rows.filter(p=>pageMatches(p,q));
+    const sorters={last_desc:p=>p.last_write||'',last_asc:p=>p.last_write||'',revs_desc:p=>p.n_revs||0,name_asc:p=>(p.name||'').toLowerCase(),bytes_desc:p=>p.body_bytes||0};
+    rows=[...rows].sort((a,b)=>{const av=sorters[sort]?.(a)??sorters.last_desc(a),bv=sorters[sort]?.(b)??sorters.last_desc(b); return av<bv?-1:av>bv?1:0});
+    if(['last_desc','revs_desc','bytes_desc'].includes(sort))rows.reverse();
+    return {total:rows.length,offset,limit,rows:rows.slice(offset,offset+limit)};
+  }
+  if(path==='descriptions'){
+    const q=String(params.q||'').trim().toLowerCase(),wiki=params.wiki||'',family=params.family||'',prefix=String(params.prefix||'').trim().toLowerCase(),letter=params.letter||'';
+    const offset=Number(params.offset)||0,limit=Math.max(1,Math.min(500,Number(params.limit)||120));
+    let rows=archive.descriptions;
+    if(wiki)rows=rows.filter(d=>d.wiki===wiki);
+    if(family)rows=rows.filter(d=>(d.page_family||'unknown')===family);
+    if(prefix)rows=rows.filter(d=>String(d.name||'').toLowerCase().startsWith(prefix));
+    if(letter)rows=rows.filter(d=>d.prefix===letter);
+    if(q)rows=rows.filter(d=>contains(d.name,q)||contains(d.description,q)||contains(d.page_family,q)||contains(d.wiki,q));
+    return {total:rows.length,offset,limit,rows:rows.slice(offset,offset+limit)};
+  }
+  if(path==='page'){
+    const p=archive.pageById.get(params.id); if(!p)throw new Error('Page not found');
+    return {page:p,revisions:archive.revsByPage.get(p.page_id)||[],events:(archive.eventsByPageKey.get(p.page_key)||[]).map(eventSummary)};
+  }
+  if(path==='revision') return getRevision(params.id);
+  if(path==='diff'){
+    const r=await getRevision(params.id),base=r.diff_base?await getRevision(r.diff_base):null;
+    return {base,revision:r,diff:buildUnifiedDiff(base,r)};
+  }
+  if(path==='events'){
+    const q=String(params.q||'').trim().toLowerCase(),typ=params.type||'',wiki=params.wiki||'',offset=Number(params.offset)||0,limit=Math.max(1,Math.min(500,Number(params.limit)||100));
+    let rows=archive.events;
+    if(typ)rows=rows.filter(e=>e.event_type===typ); if(wiki)rows=rows.filter(e=>e.wiki===wiki); if(q)rows=rows.filter(e=>eventMatches(e,q));
+    rows=[...rows].sort((a,b)=>String(b.time||'').localeCompare(String(a.time||'')));
+    return {total:rows.length,offset,limit,rows:rows.slice(offset,offset+limit).map(eventSummary)};
+  }
+  if(path==='labels'){
+    const q=String(params.q||'').trim().toLowerCase(),wiki=params.wiki||'',human=params.human||'',sort=params.sort||'revs_desc',offset=Number(params.offset)||0,limit=Math.max(1,Math.min(500,Number(params.limit)||100));
+    let rows=archive.labels;
+    if(q)rows=rows.filter(l=>contains(l.label,q)); if(wiki)rows=rows.filter(l=>(l.wikis||[]).includes(wiki)); if(human==='yes')rows=rows.filter(l=>l.is_human_handle); else if(human==='no')rows=rows.filter(l=>!l.is_human_handle);
+    rows=[...rows].sort((a,b)=>{ if(sort==='name_asc')return String(a.label||'').localeCompare(String(b.label||'')); if(sort==='pages_desc')return (b.stored_revision_pages??b.pages?.length??0)-(a.stored_revision_pages??a.pages?.length??0); return (b.stored_revisions||0)-(a.stored_revisions||0); });
+    return {total:rows.length,offset,limit,rows:rows.slice(offset,offset+limit)};
+  }
+  if(path==='label'){
+    const l=archive.labelByName.get(params.name??''); if(!l)throw new Error('Label not found');
+    return {label:l,pages:(l.pages||[]).map(id=>archive.pageById.get(id)).filter(Boolean)};
+  }
+  if(path==='search'){
+    const q=String(params.q||'').trim().toLowerCase(),limit=Math.max(1,Math.min(200,Number(params.limit)||60)),deep=params.deep==='yes';
+    if(q.length<2)return {q,pages:[],labels:[],revisions:[],events:[],deep};
+    const pages=archive.pages.filter(p=>pageMatches(p,q)).slice(0,limit);
+    const labels=archive.labels.filter(l=>contains(l.label,q)).slice(0,limit);
+    const events=[...archive.events].reverse().filter(e=>eventMatches(e,q)).slice(0,limit).map(eventSummary);
+    const revisions=[];
+    if(deep){
+      await loadAllRevisionShards();
+      for(let i=archive.revisions.length-1;i>=0&&revisions.length<limit;i--){
+        const s=archive.revisions[i],r=await getRevision(s.rev_id),body=r.body||'',summary=r.change_summary||'';
+        if(contains(body,q)||contains(summary,q))revisions.push({...s,snippet:makeSnippet(body,q)});
+      }
+      status('Static archive loaded');
+    }
+    return {q,pages,labels,revisions,events,deep};
+  }
+  throw new Error('Unknown archive request');
+}
+
+function setView(view){
+  state.view=view;
+  $$('.nav button').forEach(b=>b.classList.toggle('active', b.dataset.view===view));
+  history.replaceState(null,'',`#${view}`);
+  if(view==='overview') renderOverview();
+  if(view==='pages') renderPages();
+  if(view==='descriptions') renderDescriptions();
+  if(view==='events') renderEvents();
+  if(view==='labels') renderLabels();
+  $('#sidebar').classList.remove('open');
+}
+function head(title, sub, actions=''){ return `<div class="page-head"><div class="page-title"><h1>${esc(title)}</h1><p>${sub}</p></div><div class="actions">${actions}</div></div>`; }
+
+async function renderOverview(){
+  const m=state.meta;
+  content.innerHTML = head('Archive overview', `A compact view of the held Evilwiki corpus generated ${dt(m.generated_at)}.`) + `
+    <div class="stats-grid">
+      ${stat('Pages',n(m.counts.pages),'distinct wiki/page pairs')}
+      ${stat('Revisions',n(m.counts.revisions),bytes(m.body_bytes)+' of revision bodies')}
+      ${stat('Labels',n(m.counts.labels),n(m.human_handles.length)+' marked human handles')}
+      ${stat('Events',n(m.counts.events),'save/delete/revert/probe rows')}
+    </div>
+    <div class="grid-2">
+      <div class="panel"><div class="panel-head"><h2>Wiki footprint</h2><span class="muted">pages / revisions</span></div><div class="panel-body">${wikiBars(m.wikis)}</div></div>
+      <div class="panel"><div class="panel-head"><h2>Event mix</h2><span class="muted">physical rows</span></div><div class="panel-body"><div class="legend-grid">${Object.entries(m.event_types).map(([k,v])=>`<div class="legend-item"><span class="tag ${k}">${esc(k)}</span><strong>${n(v)}</strong><span>${((v/m.counts.events)*100).toFixed(1)}% of rows</span></div>`).join('')}</div></div></div>
+      <div class="panel"><div class="panel-head"><h2>Most common page families</h2><span class="muted">top 10</span></div><div class="panel-body">${familyBars(m.page_families.slice(0,10))}</div></div>
+      <div class="panel"><div class="panel-head"><h2>Archive notes</h2><span class="muted">static build</span></div><div class="panel-body"><div class="fact-list">${facts(m)}</div></div></div>
+    </div>`;
+}

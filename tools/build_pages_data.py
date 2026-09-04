@@ -7,8 +7,11 @@ import gzip
 import json
 import shutil
 import zlib
+import csv
 from collections import Counter, defaultdict
 from pathlib import Path
+
+from descriptions import describe_page, prefix_for
 
 SUMMARY_KEYS = (
     'rev_id','page_id','wiki','name','seq','rcs_rev','body_len','lines','diff_base','diff_base_reason',
@@ -45,6 +48,8 @@ def write_jsonl_gz(path: Path, rows):
             f.write('\n')
 
 
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('source', nargs='?', default='../../evilwiki_viewer/data', help='source data folder from the local viewer')
@@ -67,6 +72,7 @@ def main():
     summaries = []
     rev_times = []
     wiki_rev_counts = Counter()
+    latest_rev_by_page = {}
 
     for rev in read_jsonl_gz(source / 'revisions.jsonl.gz'):
         shard = zlib.crc32(rev['page_id'].encode('utf-8')) % args.shards
@@ -75,8 +81,31 @@ def main():
         summaries.append(summary)
         shard_rows[shard].append(rev)
         wiki_rev_counts[rev.get('wiki')] += 1
+        current = latest_rev_by_page.get(rev['page_id'])
+        if current is None or (rev.get('seq') or 0) >= (current.get('seq') or 0):
+            latest_rev_by_page[rev['page_id']] = rev
         if rev.get('time'):
             rev_times.append(rev['time'])
+
+    descriptions = []
+    description_sources = Counter()
+    prefix_counts = Counter()
+    for page in sorted(pages, key=lambda p: ((p.get('name') or '').casefold(), p.get('wiki') or '')):
+        description, source_kind = describe_page(page, latest_rev_by_page.get(page['page_id']))
+        prefix = prefix_for(page.get('name'))
+        row = {
+            'page_id': page['page_id'],
+            'page_key': page.get('page_key'),
+            'wiki': page.get('wiki'),
+            'name': page.get('name'),
+            'prefix': prefix,
+            'page_family': page.get('page_family') or 'unknown',
+            'description': description,
+            'description_source': source_kind,
+        }
+        descriptions.append(row)
+        description_sources[source_kind] += 1
+        prefix_counts[prefix] += 1
 
     wiki_page_counts = Counter(p.get('wiki') for p in pages)
     event_type_counts = Counter(e.get('event_type') for e in events)
@@ -104,6 +133,8 @@ def main():
         'human_handles': [l.get('label') for l in labels if l.get('is_human_handle')],
         'facts': manifest.get('facts', {}),
         'revision_shards': args.shards,
+        'description_prefixes': [[k, prefix_counts[k]] for k in ['#','0–9',*list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')] if prefix_counts[k]],
+        'description_sources': dict(description_sources),
     }
 
     write_json(out / 'meta.json', meta)
@@ -111,18 +142,27 @@ def main():
     shutil.copy2(source / 'labels.jsonl.gz', out / 'labels.jsonl.gz')
     shutil.copy2(source / 'events.jsonl.gz', out / 'events.jsonl.gz')
     shutil.copy2(source / 'manifest.json.gz', out / 'manifest.json.gz')
+    write_jsonl_gz(out / 'page-descriptions.jsonl.gz', descriptions)
+    with (out / 'page-descriptions.csv').open('w', encoding='utf-8', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['name','wiki','page_id','prefix','page_family','description','description_source'])
+        writer.writeheader()
+        writer.writerows({k: row.get(k) for k in writer.fieldnames} for row in descriptions)
     write_jsonl_gz(out / 'revision-summaries.jsonl.gz', summaries)
     for i, rows in enumerate(shard_rows):
         write_jsonl_gz(out / 'revisions' / f'{i:02d}.jsonl.gz', rows)
 
     index = {
         'revision_shards': args.shards,
+        'description_prefixes': [[k, prefix_counts[k]] for k in ['#','0–9',*list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')] if prefix_counts[k]],
+        'description_sources': dict(description_sources),
         'shard_counts': [len(x) for x in shard_rows],
         'files': {
             'pages': 'pages.jsonl.gz',
             'labels': 'labels.jsonl.gz',
             'events': 'events.jsonl.gz',
             'revision_summaries': 'revision-summaries.jsonl.gz',
+            'page_descriptions': 'page-descriptions.jsonl.gz',
+            'page_descriptions_csv': 'page-descriptions.csv',
             'revision_shard_pattern': 'revisions/{shard}.jsonl.gz',
         },
     }

@@ -6,6 +6,8 @@ The viewer includes:
 
 - archive overview and counts
 - page browsing and filtering
+- alphabetical descriptions for every held page, with A–Z/prefix filtering
+- downloadable `page-descriptions.csv` generated at deploy time
 - full revision bodies and history
 - client-side diffs
 - save/delete/revert/probe event browsing
@@ -16,7 +18,7 @@ The viewer includes:
 
 ## GitHub Pages deployment
 
-The repository intentionally keeps the multi-megabyte archive out of Git history. On every Pages deployment, `.github/workflows/pages.yml` assembles the browser assets, downloads the five machine-readable files from the public Collusion.wiki export, verifies the published SHA-256 checksums, rebuilds the static viewer data into 16 revision shards, runs integrity QA, and then publishes the resulting site.
+The repository intentionally keeps the multi-megabyte archive out of Git history. On every Pages deployment, `.github/workflows/pages.yml` downloads the five machine-readable files from the public Collusion.wiki export, verifies the published SHA-256 checksums, rebuilds the static viewer data into 16 revision shards, generates one description for every held page from its latest revision plus page-family metadata, runs integrity QA, and then publishes the resulting site.
 
 Source export:
 
