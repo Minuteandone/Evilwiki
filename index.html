@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="description" content="Static browser viewer for the Evilwiki archive." />
+  <title>Evilwiki Archive Viewer</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark">E</div>
+        <div><strong>Evilwiki</strong><span>archive viewer</span></div>
+      </div>
+      <nav class="nav" id="nav">
+        <button data-view="overview" class="active"><span>⌂</span> Overview</button>
+        <button data-view="pages"><span>▤</span> Pages</button>
+        <button data-view="events"><span>↯</span> Events</button>
+        <button data-view="labels"><span>◎</span> Labels</button>
+      </nav>
+      <div class="sidebar-foot">
+        <button id="themeBtn" class="ghost-btn">◐ Theme</button>
+        <div id="archiveStamp" class="archive-stamp">Loading archive…</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="menu-btn" id="menuBtn" aria-label="Open navigation">☰</button>
+        <div class="search-wrap">
+          <span>⌕</span>
+          <input id="globalSearch" placeholder="Search pages, labels, revision text…" autocomplete="off" />
+          <kbd>/</kbd>
+        </div>
+        <div class="top-actions"><span id="statusDot" class="status-dot"></span><span id="statusText">Loading static archive…</span></div>
+      </header>
+
+      <section id="content" class="content"><div class="loading">Loading Evilwiki…</div></section>
+    </main>
+  </div>
+  <div id="drawer" class="drawer hidden"></div>
+  <div id="toast" class="toast hidden"></div>
+  <noscript>This viewer needs JavaScript enabled.</noscript>
+  <script src="./app.js"></script>
+</body>
+</html>
