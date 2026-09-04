@@ -32,6 +32,13 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Assemble static assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat src/app.js.part.* > app.js
+          cat src/styles.css.part.* > styles.css
+
       - name: Fetch the published Evilwiki export
         shell: bash
         run: |
@@ -72,8 +79,8 @@ jobs:
       - name: Run archive QA
         run: python tools/qa_static.py
 
-      - name: Remove build-only source files
-        run: rm -rf source-data
+      - name: Remove build-only files
+        run: rm -rf source-data src tools
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
